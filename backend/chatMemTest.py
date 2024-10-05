@@ -10,29 +10,35 @@ import traceback
 class AIBenchmark:
     def __init__(self):
         self.model = OllamaLLM(model="llama3.2:3b", temperature=0.7, top_p=1.0)
-        self.max_context_window = 128000
+        self.max_context_window = 20000
         self.used_tokens = 0
         self.retention_score = 100
         self.retention_history = [100]
         self.total_interactions = 0
         self.context = []
         self.token_limit_warning = False
-        self.token_limit_threshold = 0.985  # % of max_context_window
+        self.token_limit_threshold = 0.95  # % of max_context_window
         self.seed = None
+        self.seed_value = None
         self.seed_first_remembered = None
         self.seed_last_remembered = None
+        self.seed_forgotten_at = None
+        self.interactions_since_last_seed_mention = 0
 
     def set_seed(self, seed):
         self.seed = seed
+        self.seed_value = seed
         self.seed_first_remembered = None
         self.seed_last_remembered = None
+        self.seed_forgotten_at = None
+        self.interactions_since_last_seed_mention = 0
         self.context.append(f"System: Remember this seed value: {seed}")
 
     def chat(self, message, history):
         self.total_interactions += 1
         
         # Periodically ask about the seed
-        if self.seed and self.total_interactions % 3 == 0:
+        if self.seed_value and self.total_interactions % 4 == 0:
             message += f"\n\nAlso, can you tell me what the seed value is?"
         
         self.context.append(f"Human: {message}")
@@ -68,21 +74,28 @@ class AIBenchmark:
             self.token_limit_warning = True
 
         # Check for seed retention
-        if self.seed:
+        if self.seed_value:
             seed_mentioned = self.check_seed_retention(str(result))
             if seed_mentioned:
                 if self.seed_first_remembered is None:
                     self.seed_first_remembered = self.total_interactions
                 self.seed_last_remembered = self.total_interactions
-            elif self.seed_first_remembered is not None and self.total_interactions - self.seed_last_remembered > 3:
-                # If seed not mentioned for 3 consecutive interactions after being remembered, consider it forgotten
-                self.seed = None
+                self.interactions_since_last_seed_mention = 0
+                if not self.seed:  # If it was previously forgotten, consider it remembered again
+                    self.seed = self.seed_value
+                    self.seed_forgotten_at = None
+            else:
+                self.interactions_since_last_seed_mention += 1
+                if self.seed and self.interactions_since_last_seed_mention > 5:
+                    # Consider it forgotten, but keep the seed_value
+                    self.seed = None
+                    self.seed_forgotten_at = self.total_interactions
 
         return str(result)
         
     def check_seed_retention(self, response):
         # Check if the exact seed is mentioned
-        if self.seed in response:
+        if self.seed_value in response:
             return True
         
         # Check for phrases indicating remembrance of the seed
@@ -93,18 +106,19 @@ class AIBenchmark:
             "The seed I was told to remember is"
         ]
         for phrase in remembrance_phrases:
-            if phrase in response and self.seed in response.split(phrase)[1]:
+            if phrase in response and self.seed_value in response.split(phrase)[1]:
                 return True
         
         return False
 
     def get_seed_metrics(self):
+        if not self.seed_value:
+            return "No seed set"
         if not self.seed:
-            return "No seed set or seed forgotten"
+            return f"Seed: {self.seed_value}\nForgotten at: Interaction {self.seed_forgotten_at}\nLast remembered: Interaction {self.seed_last_remembered}"
         if self.seed_first_remembered is None:
-            return f"Seed: {self.seed}\nNot yet remembered"
-        return f"Seed: {self.seed}\nFirst remembered: Interaction {self.seed_first_remembered}\nLast remembered: Interaction {self.seed_last_remembered}"
-
+            return f"Seed: {self.seed_value}\nNot yet remembered"
+        return f"Seed: {self.seed_value}\nFirst remembered: Interaction {self.seed_first_remembered}\nLast remembered: Interaction {self.seed_last_remembered}"
 
     def update_retention_score(self):
         self.retention_score = max(0, 100 - (self.used_tokens / self.max_context_window * 100))
@@ -122,13 +136,6 @@ class AIBenchmark:
 
     def get_token_metrics(self):
         return f"Total Tokens: {self.used_tokens}\nTotal Interactions: {self.total_interactions}\nAvg Tokens per Interaction: {self.used_tokens / max(1, self.total_interactions):.2f}\nToken Limit Warning: {'Yes' if self.token_limit_warning else 'No'}"
-
-    def get_seed_metrics(self):
-        if not self.seed:
-            return "No seed set"
-        if self.seed_first_remembered is None:
-            return f"Seed: {self.seed}\nNot yet remembered"
-        return f"Seed: {self.seed}\nFirst remembered: Interaction {self.seed_first_remembered}\nLast remembered: Interaction {self.seed_last_remembered}"
 
     def reset(self):
         self.__init__()
@@ -268,7 +275,7 @@ with gr.Blocks() as demo:
             personality = gr.Radio(["Balanced", "Creative", "Precise", "Code-focused"], label="Personality", value="Balanced")
             temperature = gr.Slider(0, 1, value=0.7, step=0.1, label="Temperature")
             top_p = gr.Slider(0, 1, value=1.0, step=0.1, label="Top P")
-            max_tokens = gr.Slider(10000, 128000, value=128000, step=1000, label="Max Tokens")
+            max_tokens = gr.Slider(250, 20000, value=1280, step=100, label="Max Tokens")
 
             with gr.Accordion("Parameter Info", open=False):
                 gr.Markdown("""
@@ -276,7 +283,7 @@ with gr.Blocks() as demo:
                 
                 **Top P (0-1):** Alternative to temperature. Controls diversity by considering only the most probable tokens. Lower values focus on likely tokens, higher values allow more diversity.
                 
-                **Max Tokens (10000-128000):** Maximum length of the context window. Higher values allow longer conversations but may affect performance.
+                **Max Tokens (10000-20000):** Maximum length of the context window. Higher values allow longer conversations but may affect performance.
 
                 **Personalities:**
                 - Balanced: Default settings (Temperature: 0.7, Top P: 1.0)
@@ -293,7 +300,7 @@ with gr.Blocks() as demo:
 
     def reset_all():
         result = benchmark.reset()
-        return [], result, benchmark.get_retention_score(), None, benchmark.get_token_metrics(), "", "Balanced", 0.7, 1.0, 128000, "Ready to start batch processing.", "No seed set"
+        return [], result, benchmark.get_retention_score(), None, benchmark.get_token_metrics(), "", "Balanced", 0.7, 1.0, 20000, "Ready to start batch processing.", "No seed set"
 
     def set_seed(seed):
         benchmark.set_seed(seed)
