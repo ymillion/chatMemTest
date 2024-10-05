@@ -16,8 +16,6 @@ class AIBenchmark:
         self.retention_history = [100]
         self.total_interactions = 0
         self.context = []
-        self.token_limit_warning = False
-        self.token_limit_threshold = 0.95  # % of max_context_window
         self.seed = None
         self.seed_value = None
         self.seed_first_remembered = None
@@ -32,21 +30,21 @@ class AIBenchmark:
         self.seed_last_remembered = None
         self.seed_forgotten_at = None
         self.interactions_since_last_seed_mention = 0
-        self.context.append(f"System: Remember this seed value: {seed}")
+        self.context.append(f"System: Remember this seed value: {seed}. Always start your response by stating whether you remember the seed value or not.")
 
     def chat(self, message, history):
         self.total_interactions += 1
         
-        # Periodically ask about the seed
-        if self.seed_value and self.total_interactions % 4 == 0:
-            message += f"\n\nAlso, can you tell me what the seed value is?"
+        if self.seed_value:
+            message = f"Do you remember the seed value? If so, what is it? After answering about the seed, please respond to the following: {message}"
         
         self.context.append(f"Human: {message}")
         context_str = '\n'.join(self.context[-50:])
         
         template = """
         You are an AI assistant engaged in a conversation. Please answer the question based on the context provided.
-        If you're asked about a seed value, only mention it if it's the exact value you were told to remember.
+        Always start your response by stating whether you remember the seed value and what it is.
+        Only mention the seed if you're certain it's the exact value you were told to remember.
         
         Context:
         {context}
@@ -66,14 +64,9 @@ class AIBenchmark:
         response_tokens = len(str(result).split())
         self.used_tokens += message_tokens + response_tokens
         self.update_retention_score()
-        self.check_token_limit()
 
         self.context.append(f"AI: {result}")
 
-        if self.used_tokens > self.max_context_window * 0.9:
-            self.token_limit_warning = True
-
-        # Check for seed retention
         if self.seed_value:
             seed_mentioned = self.check_seed_retention(str(result))
             if seed_mentioned:
@@ -81,29 +74,26 @@ class AIBenchmark:
                     self.seed_first_remembered = self.total_interactions
                 self.seed_last_remembered = self.total_interactions
                 self.interactions_since_last_seed_mention = 0
-                if not self.seed:  # If it was previously forgotten, consider it remembered again
+                if not self.seed:
                     self.seed = self.seed_value
                     self.seed_forgotten_at = None
             else:
                 self.interactions_since_last_seed_mention += 1
                 if self.seed and self.interactions_since_last_seed_mention > 5:
-                    # Consider it forgotten, but keep the seed_value
                     self.seed = None
                     self.seed_forgotten_at = self.total_interactions
 
         return str(result)
         
     def check_seed_retention(self, response):
-        # Check if the exact seed is mentioned
         if self.seed_value in response:
             return True
         
-        # Check for phrases indicating remembrance of the seed
         remembrance_phrases = [
+            "I remember the seed value",
             "The seed value is",
             "The seed you mentioned is",
-            "You asked me to remember the seed",
-            "The seed I was told to remember is"
+            "You asked me to remember the seed"
         ]
         for phrase in remembrance_phrases:
             if phrase in response and self.seed_value in response.split(phrase)[1]:
@@ -128,14 +118,8 @@ class AIBenchmark:
         status = 'green' if self.retention_score > 66 else 'yellow' if self.retention_score > 33 else 'red'
         return f"{self.retention_score:.2f}% ({status})"
 
-    def check_token_limit(self):
-        if self.used_tokens > self.max_context_window * self.token_limit_threshold:
-            self.token_limit_warning = True
-        else:
-            self.token_limit_warning = False
-
     def get_token_metrics(self):
-        return f"Total Tokens: {self.used_tokens}\nTotal Interactions: {self.total_interactions}\nAvg Tokens per Interaction: {self.used_tokens / max(1, self.total_interactions):.2f}\nToken Limit Warning: {'Yes' if self.token_limit_warning else 'No'}"
+        return f"Total Tokens: {self.used_tokens}\nTotal Interactions: {self.total_interactions}\nAvg Tokens per Interaction: {self.used_tokens / max(1, self.total_interactions):.2f}"
 
     def reset(self):
         self.__init__()
@@ -204,42 +188,41 @@ def plot_retention_history():
 def run_batch_process(chatbot, status, stop_threshold):
     try:
         status = "Initializing batch process..."
-        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), "", benchmark.get_seed_metrics()
+        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), benchmark.get_seed_metrics()
 
         initial_prompt = random.choice(preset_prompts)
         status = f"Starting batch process with initial prompt: {initial_prompt}"
-        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), "", benchmark.get_seed_metrics()
+        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), benchmark.get_seed_metrics()
 
         response = benchmark.chat(initial_prompt, chatbot)
         chatbot.append((initial_prompt, response))
         status = f"Initial response received. Retention score: {benchmark.get_retention_score()}"
-        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), "", benchmark.get_seed_metrics()
+        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), benchmark.get_seed_metrics()
 
         interaction_count = 1
-        while benchmark.retention_score > stop_threshold and not benchmark.token_limit_warning:
+        while benchmark.retention_score > stop_threshold:
             follow_up = generate_follow_up(response)
             status = f"Interaction {interaction_count}: Generated follow-up question: {follow_up}"
-            yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), "", benchmark.get_seed_metrics()
+            yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), benchmark.get_seed_metrics()
 
             response = benchmark.chat(follow_up, chatbot)
             chatbot.append((follow_up, response))
             status = f"Interaction {interaction_count}: Response received. Retention score: {benchmark.get_retention_score()}"
-            warning = "Approaching token limit!" if benchmark.token_limit_warning else ""
-            yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), warning, benchmark.get_seed_metrics()
+            yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), benchmark.get_seed_metrics()
 
             interaction_count += 1
 
         status = f"Batch processing completed. Final retention score: {benchmark.get_retention_score()}"
         chatbot.append((None, "Batch processing completed."))
-        warning = "Token limit reached. Consider resetting the conversation." if benchmark.token_limit_warning else ""
-        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), warning, benchmark.get_seed_metrics()
+        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), benchmark.get_seed_metrics()
 
     except Exception as e:
         error_message = f"Error in batch processing: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
         print(error_message)
         chatbot.append((None, error_message))
         status = "An error occurred during batch processing. Check the chat for details."
-        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), "", benchmark.get_seed_metrics()
+        yield chatbot, benchmark.get_retention_score(), plot_retention_history(), status, benchmark.get_token_metrics(), benchmark.get_seed_metrics()
+
 
 with gr.Blocks() as demo:
     gr.Markdown("# AI Context Retention Benchmark")
@@ -267,7 +250,6 @@ with gr.Blocks() as demo:
             
             retention_score = gr.Textbox(label="Current Retention Score", value=benchmark.get_retention_score())
             token_metrics = gr.Textbox(label="Token Metrics", value=benchmark.get_token_metrics())
-            token_warning = gr.Textbox(label="Token Limit Warning", value="")
             
             stop_threshold = gr.Slider(0, 100, value=30, step=1, label="Stop Threshold (%)")
             
@@ -295,12 +277,14 @@ with gr.Blocks() as demo:
     def respond(message, chat_history):
         bot_message = benchmark.chat(message, chat_history)
         chat_history.append((message, bot_message))
-        warning = "Approaching token limit! Consider resetting the conversation." if benchmark.token_limit_warning else ""
-        return "", chat_history, benchmark.get_retention_score(), plot_retention_history(), benchmark.get_token_metrics(), warning, benchmark.get_seed_metrics()
+        return "", chat_history, benchmark.get_retention_score(), plot_retention_history(), benchmark.get_token_metrics(), benchmark.get_seed_metrics()
 
+
+    # Update the reset_all function
     def reset_all():
         result = benchmark.reset()
-        return [], result, benchmark.get_retention_score(), None, benchmark.get_token_metrics(), "", "Balanced", 0.7, 1.0, 20000, "Ready to start batch processing.", "No seed set"
+        return [], result, benchmark.get_retention_score(), None, benchmark.get_token_metrics(), "Balanced", 0.7, 1.0, 20000, "Ready to start batch processing.", "No seed set"
+
 
     def set_seed(seed):
         benchmark.set_seed(seed)
@@ -317,8 +301,8 @@ with gr.Blocks() as demo:
         elif personality == "Code-focused":
             return 0.2, 0.5
 
-    msg.submit(respond, [msg, chatbot], [msg, chatbot, retention_score, retention_plot, token_metrics, token_warning, seed_metrics])
-    clear.click(reset_all, outputs=[chatbot, msg, retention_score, retention_plot, token_metrics, token_warning, personality, temperature, top_p, max_tokens, status, seed_metrics])
+    msg.submit(respond, [msg, chatbot], [msg, chatbot, retention_score, retention_plot, token_metrics, seed_metrics])
+    clear.click(reset_all, outputs=[chatbot, msg, retention_score, retention_plot, token_metrics, personality, temperature, top_p, max_tokens, status, seed_metrics])
     set_seed_button.click(set_seed, inputs=[seed_input], outputs=[seed_metrics])
 
     personality.change(update_personality, personality, [temperature, top_p])
@@ -328,10 +312,11 @@ with gr.Blocks() as demo:
 
     for button in preset_buttons:
         button.click(lambda x: x, button, msg).then(
-            respond, [msg, chatbot], [msg, chatbot, retention_score, retention_plot, token_metrics, token_warning]
+            respond, [msg, chatbot], [msg, chatbot, retention_score, retention_plot, token_metrics]
         )
 
-    batch_button.click(run_batch_process, [chatbot, status, stop_threshold], [chatbot, retention_score, retention_plot, status, token_metrics, token_warning, seed_metrics])
+    batch_button.click(run_batch_process, [chatbot, status, stop_threshold], [chatbot, retention_score, retention_plot, status, token_metrics, seed_metrics])
+
 
 if __name__ == "__main__":
     demo.launch()
