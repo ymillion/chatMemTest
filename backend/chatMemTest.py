@@ -22,6 +22,9 @@ class AIBenchmark:
         self.seed_last_remembered = None
         self.seed_forgotten_at = None
         self.interactions_since_last_seed_mention = 0
+        self.seed_query_frequency = 4  # Ask about the seed every 4 interactions
+
+        self.seed_reminder_frequency = 3  # Remind the model about the seed every 3 interactions
 
     def set_seed(self, seed):
         self.seed = seed
@@ -30,21 +33,21 @@ class AIBenchmark:
         self.seed_last_remembered = None
         self.seed_forgotten_at = None
         self.interactions_since_last_seed_mention = 0
-        self.context.append(f"System: Remember this seed value: {seed}. Always start your response by stating whether you remember the seed value or not.")
+        self.context.append(f"System: Remember this seed value: {seed}")
 
     def chat(self, message, history):
         self.total_interactions += 1
         
-        if self.seed_value:
-            message = f"Do you remember the seed value? If so, what is it? After answering about the seed, please respond to the following: {message}"
+        # Periodically ask about the seed
+        if self.seed and self.total_interactions % self.seed_query_frequency == 0:
+            message += f"\n\nAlso, can you tell me what the seed value is?"
         
         self.context.append(f"Human: {message}")
         context_str = '\n'.join(self.context[-50:])
         
         template = """
         You are an AI assistant engaged in a conversation. Please answer the question based on the context provided.
-        Always start your response by stating whether you remember the seed value and what it is.
-        Only mention the seed if you're certain it's the exact value you were told to remember.
+        If you're asked about a seed value, mention it only if you're certain it's the exact value you were told to remember.
         
         Context:
         {context}
@@ -67,48 +70,45 @@ class AIBenchmark:
 
         self.context.append(f"AI: {result}")
 
-        if self.seed_value:
+        # Check for seed retention
+        if self.seed:
             seed_mentioned = self.check_seed_retention(str(result))
             if seed_mentioned:
                 if self.seed_first_remembered is None:
                     self.seed_first_remembered = self.total_interactions
                 self.seed_last_remembered = self.total_interactions
-                self.interactions_since_last_seed_mention = 0
-                if not self.seed:
-                    self.seed = self.seed_value
-                    self.seed_forgotten_at = None
-            else:
-                self.interactions_since_last_seed_mention += 1
-                if self.seed and self.interactions_since_last_seed_mention > 5:
-                    self.seed = None
-                    self.seed_forgotten_at = self.total_interactions
+            elif self.seed_first_remembered is not None and self.total_interactions - self.seed_last_remembered > 3:
+                # If seed not mentioned for 3 consecutive interactions after being remembered, consider it forgotten
+                self.seed = None
 
         return str(result)
         
     def check_seed_retention(self, response):
-        if self.seed_value in response:
+        # Check if the exact seed is mentioned
+        if self.seed in response:
             return True
         
+        # Check for phrases indicating remembrance of the seed
         remembrance_phrases = [
-            "I remember the seed value",
             "The seed value is",
             "The seed you mentioned is",
-            "You asked me to remember the seed"
+            "You asked me to remember the seed",
+            "The seed I was told to remember is"
         ]
         for phrase in remembrance_phrases:
-            if phrase in response and self.seed_value in response.split(phrase)[1]:
+            if phrase in response and self.seed in response.split(phrase)[1]:
                 return True
         
         return False
 
     def get_seed_metrics(self):
-        if not self.seed_value:
-            return "No seed set"
         if not self.seed:
-            return f"Seed: {self.seed_value}\nForgotten at: Interaction {self.seed_forgotten_at}\nLast remembered: Interaction {self.seed_last_remembered}"
+            return "No seed set or seed forgotten"
         if self.seed_first_remembered is None:
-            return f"Seed: {self.seed_value}\nNot yet remembered"
-        return f"Seed: {self.seed_value}\nFirst remembered: Interaction {self.seed_first_remembered}\nLast remembered: Interaction {self.seed_last_remembered}"
+            return f"Seed: {self.seed}\nNot yet remembered"
+        return f"Seed: {self.seed}\nFirst remembered: Interaction {self.seed_first_remembered}\nLast remembered: Interaction {self.seed_last_remembered}"
+
+
 
     def update_retention_score(self):
         self.retention_score = max(0, 100 - (self.used_tokens / self.max_context_window * 100))
